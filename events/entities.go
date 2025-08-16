@@ -404,7 +404,6 @@ func launch(metaverse string, eventTypes []string, outputDir string) {
 				logging(fmt.Sprintf("Save data for request #%d ...", requestCount))
 				if eventsList.Next != "" {
 					nextToken = eventsList.Next
-					stop = true
 				} else {
 					stop = true
 				}
