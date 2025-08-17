@@ -163,7 +163,7 @@ func getRaribleNftActivities(blockchain, contractId, cursor string, eventTypes [
 	collection := fmt.Sprintf("%s:%s", strings.ToUpper(blockchain), strings.ToLower(contractId))
 	payload := map[string]any{
 		"collection": collection,
-		"size":       10,
+		"size":       1000,
 		"sort":       "EARLIEST_FIRST",
 	}
 	if eventTypes != nil && len(eventTypes) > 0 {
@@ -386,10 +386,11 @@ func raribleLaunch(blockchain, metaverse, assetContract string, eventTypes []str
 				helpers.Logging(loggingPrefix, fmt.Sprintf("Save data for request #%d ...", requestCount))
 				if activityList.Cursor != "" {
 					nextToken = activityList.Cursor
-					stop = true
-					//if len(activityList.Activities) == 0 {
-					//	stop = true
-					//}
+					if len(activityList.Activities) == 0 {
+						stop = true
+					} else {
+						time.Sleep(1 * time.Second)
+					}
 				} else {
 					stop = true
 				}
