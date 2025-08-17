@@ -1,6 +1,7 @@
 package main
 
 import (
+	"OpenSeaDataDownloader/helpers"
 	"OpenSeaDataDownloader/utils"
 	"context"
 	"errors"
@@ -14,7 +15,6 @@ import (
 	"log"
 	"math/big"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -142,32 +142,6 @@ func (o Operation) CollectionName() string {
 	return "opensea_operations"
 }
 
-type DecentralandParcel struct {
-	Id      string `mapstructure:"id"`
-	X       int    `mapstructure:"x"`
-	Y       int    `mapstructure:"y"`
-	TokenId string `mapstructure:"tokenId"`
-}
-
-type DecentralandParcelList struct {
-	Ok   bool                           `mapstructure:"ok"`
-	Data map[string]*DecentralandParcel `mapstructure:"data"`
-}
-
-func readDecentralandParcels() map[string]*DecentralandParcel {
-	filePath := filepath.Join("events", "data", "decentraland_parcels.json")
-	resp := &DecentralandParcelList{}
-	err := utils.ReadJsonFile(filePath, resp)
-	if err != nil {
-		panic(err)
-	}
-	parcelsList := make(map[string]*DecentralandParcel)
-	for _, parcel := range resp.Data {
-		parcelsList[parcel.TokenId] = parcel
-	}
-	return parcelsList
-}
-
 var decimals = map[int]string{
 	2:  "100",
 	4:  "10000",
@@ -180,7 +154,7 @@ var decimals = map[int]string{
 	18: "1000000000000000000",
 }
 
-func parseEvent(event *Event, metaverse string, parcelList map[string]*DecentralandParcel) *Operation {
+func parseEvent(event *Event, metaverse string, parcelList map[string]*helpers.DecentralandParcel) *Operation {
 	operationType := ""
 	if event.EventType == "order" {
 		operationType = event.OrderType
@@ -332,10 +306,6 @@ var (
 	loggingPrefix = ""
 )
 
-func logging(line string) {
-	println(fmt.Sprintf("[%s] // (Opensea DL) %s // %s", time.Now().Format(time.RFC3339), loggingPrefix, line))
-}
-
 func saveOperations(operations []*Operation, dbInstance *mongo.Database) error {
 	if operations != nil && len(operations) > 0 {
 		dbCollection := utils.CollectionInstance(dbInstance, &Operation{})
@@ -351,37 +321,41 @@ func saveOperations(operations []*Operation, dbInstance *mongo.Database) error {
 	return nil
 }
 
+func openseaLogging(line string) {
+	helpers.Logging(loggingPrefix, line)
+}
+
 func launch(metaverse string, eventTypes []string, outputDir string) {
 	loggingPrefix = fmt.Sprintf("Metaverse = %s | Events = %s", metaverse, strings.Join(eventTypes, ","))
-	logging("Start...")
+	openseaLogging("Start...")
 
-	logging("Read parcels data...")
-	parcelsList := readDecentralandParcels()
-	logging("Read parcels data OK !!!")
+	openseaLogging("Read parcels data...")
+	parcelsList := helpers.ReadDecentralandParcels()
+	openseaLogging("Read parcels data OK !!!")
 
-	logging("Connection to database...")
+	openseaLogging("Connection to database...")
 	dbInstance, err := utils.NewDatabaseConnection()
 	if err != nil {
 		panic(err)
 	}
 	defer utils.CloseDatabaseConnection(dbInstance)
-	logging("Connected to database !!!")
+	openseaLogging("Connected to database !!!")
 
-	logging("Getting first request `before` timestamp...")
+	openseaLogging("Getting first request `before` timestamp...")
 	startTimestamp, err := getTimestampStart(metaverse, eventTypes, dbInstance)
 	if err != nil {
 		panic(err)
 	}
-	logging("First request `before` timestamp OK !!!")
+	openseaLogging("First request `before` timestamp OK !!!")
 
-	logging("Starting requests loop...")
+	openseaLogging("Starting requests loop...")
 	nextToken := ""
 	stop := false
 	var loopErr error
 	requestCount := 0
 	for !stop {
 		requestCount++
-		logging(fmt.Sprintf("Running request #%d ...", requestCount))
+		openseaLogging(fmt.Sprintf("Running request #%d ...", requestCount))
 
 		eventsList, e1 := sendEventsRequest(metaverse, eventTypes, startTimestamp, nextToken)
 		if e1 != nil {
@@ -398,10 +372,10 @@ func launch(metaverse string, eventTypes []string, outputDir string) {
 			err = saveOperations(operations, dbInstance)
 			if err != nil {
 				loopErr = err
-				logging(fmt.Sprintf("Error occurred when saving data for request #%d ...", requestCount))
+				openseaLogging(fmt.Sprintf("Error occurred when saving data for request #%d ...", requestCount))
 				stop = true
 			} else {
-				logging(fmt.Sprintf("Save data for request #%d ...", requestCount))
+				openseaLogging(fmt.Sprintf("Save data for request #%d ...", requestCount))
 				if eventsList.Next != "" {
 					nextToken = eventsList.Next
 				} else {
@@ -410,14 +384,14 @@ func launch(metaverse string, eventTypes []string, outputDir string) {
 			}
 		}
 
-		logging(fmt.Sprintf("Request #%d done !", requestCount))
+		openseaLogging(fmt.Sprintf("Request #%d done !", requestCount))
 	}
 
 	if loopErr != nil {
-		logging(fmt.Sprintf("Error occurred in loop #%d [Message = %s]", requestCount, loopErr.Error()))
+		openseaLogging(fmt.Sprintf("Error occurred in loop #%d [Message = %s]", requestCount, loopErr.Error()))
 	}
 
-	logging("END...")
+	openseaLogging("END...")
 }
 
 func usage() {
