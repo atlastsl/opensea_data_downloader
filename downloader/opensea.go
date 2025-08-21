@@ -410,7 +410,7 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 						stop = true
 					} else {
 						nextToken = eventsList.Next
-						stop = true
+						//stop = true
 					}
 				} else {
 					stop = true
