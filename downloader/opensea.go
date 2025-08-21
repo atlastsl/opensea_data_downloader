@@ -353,7 +353,7 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 	loggingPrefix := fmt.Sprintf("{ %s | %s | %s }", blockchain, metaverse, strings.Join(eventTypes, ","))
 	helpers.Logging(loggingPrefix, "Start...")
 
-	maxTimestamp, minTimestamp := 1672531200, 1672531200
+	maxTimestamp, minTimestamp := 1672531200, 1609459200
 
 	helpers.Logging(loggingPrefix, "Read parcels data...")
 	parcelsList := helpers.ReadDecentralandParcels()
