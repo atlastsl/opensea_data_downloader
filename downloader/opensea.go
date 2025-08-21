@@ -1,23 +1,19 @@
-package main
+package downloader
 
 import (
 	"OpenSeaDataDownloader/helpers"
 	"OpenSeaDataDownloader/utils"
-	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"github.com/joho/godotenv"
-	"github.com/kamva/mgm/v3"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"log"
 	"math/big"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kamva/mgm/v3"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type EventPayment struct {
@@ -72,30 +68,6 @@ type Event struct {
 type EventList struct {
 	AssetEvents []*Event `json:"asset_events"`
 	Next        string   `json:"next"`
-}
-
-func sendEventsRequest(collection string, eventTypes []string, before int64, nextToken string) (*EventList, error) {
-	url := fmt.Sprintf("https://api.opensea.io/api/v2/events/collection/%s", collection)
-
-	payload := make(map[string]any)
-	if eventTypes != nil && len(eventTypes) > 0 {
-		payload["event_type"] = eventTypes
-	}
-	if before != 0 {
-		payload["before"] = strconv.FormatInt(before, 10)
-	}
-	if nextToken != "" {
-		payload["next"] = nextToken
-	}
-	payload["limit"] = 50
-
-	headers := map[string]string{
-		"x-api-key": os.Getenv("OPENSEA_API_KEY"),
-	}
-
-	eventsList := &EventList{}
-	err := utils.SendHttpRequest(url, "GET", headers, payload, eventsList)
-	return eventsList, err
 }
 
 type Operation struct {
@@ -154,17 +126,63 @@ var decimals = map[int]string{
 	18: "1000000000000000000",
 }
 
-func parseEvent(event *Event, metaverse string, parcelList map[string]*helpers.DecentralandParcel) *Operation {
+func getOpenseaTimestampStart(metaverse string, eventTypes []string, dbInstance *mongo.Database) (int64, error) {
+	lastOperation, err := FindLastRecordedOperation("opensea", metaverse, "", "", eventTypes, dbInstance)
+	if err != nil {
+		return 0, err
+	}
+	if lastOperation != nil {
+		return lastOperation.Date.UnixMilli() / 1000, nil
+	}
+	return 0, nil
+}
+
+func getOpenseaEventsRequest(collection string, eventTypes []string, before int64, nextToken string) (*EventList, error) {
+	url := fmt.Sprintf("https://api.opensea.io/api/v2/events/collection/%s", collection)
+
+	payload := make(map[string]any)
+	if eventTypes != nil && len(eventTypes) > 0 {
+		payload["event_type"] = eventTypes
+	}
+	if before != 0 {
+		payload["before"] = strconv.FormatInt(before, 10)
+	}
+	if nextToken != "" {
+		payload["next"] = nextToken
+	}
+	payload["limit"] = 50
+
+	headers := map[string]string{
+		"x-api-key": os.Getenv("OPENSEA_API_KEY"),
+	}
+
+	eventsList := &EventList{}
+	err := utils.SendHttpRequest(url, "GET", headers, payload, eventsList)
+	return eventsList, err
+}
+
+func formatType(rawType string) string {
+	if rawType == "sale" {
+		return "SELL"
+	} else if rawType == "listing" {
+		return "LIST"
+	} else if rawType == "item_offer" {
+		return "BID"
+	} else if rawType == "TRANSFER" {
+		return "TRANSFER"
+	}
+	return ""
+}
+
+func parseOpenseaEvent(event *Event, metaverse, blockchain string, parcelList map[string]*helpers.DecentralandParcel) *SecondMarketOperation {
 	operationType := ""
 	if event.EventType == "order" {
 		operationType = event.OrderType
-		if operationType == "item_offer" {
-			operationType = "offer"
-		}
 	} else {
 		operationType = event.EventType
 	}
-	paymentAmount, paymentCurrency, paymentToken := 0.0, "", ""
+	operationType = formatType(event.OrderType)
+	paymentAmount, paymentCurrency, paymentToken, paymentType := 0.0, "", "", ""
 	if event.Payment != nil {
 		bigAmount := new(big.Float)
 		bigAmount, _ = bigAmount.SetString(event.Payment.Quantity)
@@ -174,6 +192,11 @@ func parseEvent(event *Event, metaverse string, parcelList map[string]*helpers.D
 		paymentAmount, _ = bigPayAmount.Float64()
 		paymentCurrency = event.Payment.Symbol
 		paymentToken = event.Payment.TokenAddress
+		if slices.Contains([]string{"ETH", "POL", "MATIC"}, paymentCurrency) {
+			paymentType = paymentCurrency
+		} else {
+			paymentType = "ERC20"
+		}
 	}
 	var closingDate, startDate, expirationDate *time.Time
 	if event.ClosingDate != 0 {
@@ -238,13 +261,11 @@ func parseEvent(event *Event, metaverse string, parcelList map[string]*helpers.D
 			assetUpdatedAt = &tmp
 		}
 	}
-	assetType := ""
-	if asset.Contract == "0xf87e31492faf9a91b02ee0deaad50d51d56d5d4d" {
-		assetType = "land"
-	} else if asset.Contract == "0x959e104e1a4db6317fa58f8295f586e1a978c297" {
-		assetType = "estate"
-	}
-	return &Operation{
+	eventTime := time.UnixMilli(event.EventTimestamp * 1000)
+	assetType := GetAssetType(metaverse, asset.Contract)
+	hashPayload := fmt.Sprintf("%s:%s:%s:%s:%s:%s", metaverse, operationType, eventTime.Format(time.RFC3339Nano), event.OrderHash, from, asset.Identifier)
+	operationId := utils.CreateHash(hashPayload)
+	openseaOp := &Operation{
 		Metaverse:        metaverse,
 		Type:             operationType,
 		Date:             time.UnixMilli(event.EventTimestamp * 1000),
@@ -282,82 +303,90 @@ func parseEvent(event *Event, metaverse string, parcelList map[string]*helpers.D
 		Quantity:         event.Quantity,
 		IsPrivateListing: event.IsPrivateListing,
 	}
-}
-
-func getTimestampStart(metaverse string, eventTypes []string, dbInstance *mongo.Database) (int64, error) {
-	lastOperation := &Operation{}
-	dbCollection := utils.CollectionInstance(dbInstance, lastOperation)
-	payload := bson.M{"metaverse": metaverse, "type": bson.M{"$in": eventTypes}}
-	err := dbCollection.FirstWithCtx(context.Background(), payload, lastOperation, &options.FindOneOptions{Sort: bson.M{"date": 1}})
-	if err != nil {
-		if !errors.Is(err, mongo.ErrNoDocuments) {
-			return 0, err
-		} else {
-			lastOperation = nil
-		}
+	operation := &SecondMarketOperation{
+		OperationId:       operationId,
+		DownloadedFrom:    "opensea",
+		Type:              operationType,
+		Source:            "OPEN_SEA",
+		Date:              &eventTime,
+		LastUpdatedAt:     &eventTime,
+		Cursor:            strconv.FormatInt(eventTime.UnixMilli(), 10),
+		Reverted:          false,
+		OrderId:           "",
+		OrderHash:         event.OrderHash,
+		TransactionHash:   event.Transaction,
+		TransactionType:   "",
+		Maker:             maker,
+		Taker:             taker,
+		Buyer:             buyer,
+		Seller:            seller,
+		Metaverse:         metaverse,
+		Blockchain:        blockchain,
+		AssetContract:     asset.Contract,
+		AssetType:         assetType,
+		AssetId:           asset.Identifier,
+		AssetLocation:     assetLocation,
+		AssetLocX:         assetLocX,
+		AssetLocY:         assetLocY,
+		AssetValue:        event.Quantity,
+		PaymentBlockchain: event.Chain,
+		PaymentType:       paymentType,
+		PaymentToken:      paymentToken,
+		PaymentCurrency:   paymentCurrency,
+		PaymentAmount:     paymentAmount,
+		PaymentAmountUsd:  0,
+		PaymentCcyPrice:   0,
+		BuyerOrderHash:    "",
+		SellerOrderHash:   "",
+		BlockHash:         "",
+		BlockNumber:       0,
+		LogIndex:          0,
+		Data: map[string]any{
+			"opensea": openseaOp,
+			"rawData": event,
+		},
 	}
-	if lastOperation != nil {
-		return lastOperation.Date.UnixMilli() / 1000, nil
-	}
-	return 0, nil
+	return operation
 }
 
-var (
-	loggingPrefix = ""
-)
+func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
+	loggingPrefix := fmt.Sprintf("{ %s | %s | %s }", blockchain, metaverse, strings.Join(eventTypes, ","))
+	helpers.Logging(loggingPrefix, "Start...")
 
-func saveOperations(operations []*Operation, dbInstance *mongo.Database) error {
-	if operations != nil && len(operations) > 0 {
-		dbCollection := utils.CollectionInstance(dbInstance, &Operation{})
+	maxTimestamp, minTimestamp := 1672531200, 1672531200
 
-		dbRequests := make([]mongo.WriteModel, len(operations))
-		for i, operation := range operations {
-			var filterPayload = bson.M{"metaverse": operation.Metaverse, "type": operation.Type, "date": operation.Date, "transaction_hash": operation.TransactionHash, "order_hash": operation.OrderHash}
-			dbRequests[i] = mongo.NewReplaceOneModel().SetFilter(filterPayload).SetReplacement(operation).SetUpsert(true)
-		}
-		_, err := dbCollection.BulkWrite(context.Background(), dbRequests)
-		return err
-	}
-	return nil
-}
-
-func openseaLogging(line string) {
-	helpers.Logging(loggingPrefix, line)
-}
-
-func launch(metaverse string, eventTypes []string, outputDir string) {
-	loggingPrefix = fmt.Sprintf("Metaverse = %s | Events = %s", metaverse, strings.Join(eventTypes, ","))
-	openseaLogging("Start...")
-
-	openseaLogging("Read parcels data...")
+	helpers.Logging(loggingPrefix, "Read parcels data...")
 	parcelsList := helpers.ReadDecentralandParcels()
-	openseaLogging("Read parcels data OK !!!")
+	helpers.Logging(loggingPrefix, "Read parcels data OK !!!")
 
-	openseaLogging("Connection to database...")
-	dbInstance, err := utils.NewDatabaseConnection()
+	helpers.Logging(loggingPrefix, "Connection to database...")
+	dbInstance, err := helpers.NewDatabaseConnection()
 	if err != nil {
 		panic(err)
 	}
-	defer utils.CloseDatabaseConnection(dbInstance)
-	openseaLogging("Connected to database !!!")
+	defer helpers.CloseDatabaseConnection(dbInstance)
+	helpers.Logging(loggingPrefix, "Connected to database !!!")
 
-	openseaLogging("Getting first request `before` timestamp...")
-	startTimestamp, err := getTimestampStart(metaverse, eventTypes, dbInstance)
+	helpers.Logging(loggingPrefix, "Getting first request `before` timestamp...")
+	startTimestamp, err := getOpenseaTimestampStart(metaverse, eventTypes, dbInstance)
+	if startTimestamp == 0 {
+		startTimestamp = int64(maxTimestamp)
+	}
 	if err != nil {
 		panic(err)
 	}
-	openseaLogging("First request `before` timestamp OK !!!")
+	helpers.Logging(loggingPrefix, "First request `before` timestamp OK !!!")
 
-	openseaLogging("Starting requests loop...")
+	helpers.Logging(loggingPrefix, "Starting requests loop...")
 	nextToken := ""
 	stop := false
 	var loopErr error
 	requestCount := 0
 	for !stop {
 		requestCount++
-		openseaLogging(fmt.Sprintf("Running request #%d ...", requestCount))
+		helpers.Logging(loggingPrefix, fmt.Sprintf("Running request #%d ...", requestCount))
 
-		eventsList, e1 := sendEventsRequest(metaverse, eventTypes, startTimestamp, nextToken)
+		eventsList, e1 := getOpenseaEventsRequest(metaverse, eventTypes, startTimestamp, nextToken)
 		if e1 != nil {
 			stop = true
 			loopErr = e1
@@ -365,79 +394,36 @@ func launch(metaverse string, eventTypes []string, outputDir string) {
 			stop = true
 			loopErr = errors.New("error when parsing events list")
 		} else {
-			operations := make([]*Operation, len(eventsList.AssetEvents))
+			operations := make([]*SecondMarketOperation, len(eventsList.AssetEvents))
 			for i, event := range eventsList.AssetEvents {
-				operations[i] = parseEvent(event, metaverse, parcelsList)
+				operations[i] = parseOpenseaEvent(event, metaverse, blockchain, parcelsList)
 			}
-			err = saveOperations(operations, dbInstance)
+			err = Save2ndMarketOperations(operations, dbInstance)
 			if err != nil {
 				loopErr = err
-				openseaLogging(fmt.Sprintf("Error occurred when saving data for request #%d ...", requestCount))
+				helpers.Logging(loggingPrefix, fmt.Sprintf("Error occurred when saving data for request #%d ...", requestCount))
 				stop = true
 			} else {
-				openseaLogging(fmt.Sprintf("Save data for request #%d ...", requestCount))
+				helpers.Logging(loggingPrefix, fmt.Sprintf("Save data for request #%d ...", requestCount))
 				if eventsList.Next != "" {
-					nextToken = eventsList.Next
+					if len(eventsList.AssetEvents) > 0 && eventsList.AssetEvents[len(eventsList.AssetEvents)-1].EventTimestamp < int64(minTimestamp) {
+						stop = true
+					} else {
+						nextToken = eventsList.Next
+						stop = true
+					}
 				} else {
 					stop = true
 				}
 			}
 		}
 
-		openseaLogging(fmt.Sprintf("Request #%d done !", requestCount))
+		helpers.Logging(loggingPrefix, fmt.Sprintf("Request #%d done !", requestCount))
 	}
 
 	if loopErr != nil {
-		openseaLogging(fmt.Sprintf("Error occurred in loop #%d [Message = %s]", requestCount, loopErr.Error()))
+		helpers.Logging(loggingPrefix, fmt.Sprintf("Error occurred in loop #%d [Message = %s]", requestCount, loopErr.Error()))
 	}
 
-	openseaLogging("END...")
-}
-
-func usage() {
-	log.Println("Usage: strategy [-x collection (decentraland | thesandbox)] [-e events (comma-separated)] [-o output_dir]")
-	flag.PrintDefaults()
-}
-
-func showUsageAndExit(exitCode int) {
-	usage()
-	os.Exit(exitCode)
-}
-
-func readFlags() (*string, *string, *string, bool) {
-	var collection = flag.String("x", "", "Collection (decentraland | thesandbox)")
-	var eventsListStr = flag.String("e", "", "events (comma-separated)")
-	var outputDir = flag.String("o", "", "output_dir")
-	log.SetFlags(0)
-	flag.Usage = usage
-	flag.Parse()
-
-	if *collection == "" {
-		showUsageAndExit(0)
-		return nil, nil, nil, false
-	}
-	if *eventsListStr == "" {
-		showUsageAndExit(0)
-		return nil, nil, nil, false
-	}
-	if *outputDir == "" {
-		showUsageAndExit(0)
-		return nil, nil, nil, false
-	}
-	err := godotenv.Load(".env")
-	if err != nil {
-		log.Fatalf("Fail to load %s env file", ".env")
-		return nil, nil, nil, false
-	}
-
-	return collection, eventsListStr, outputDir, true
-}
-
-func main() {
-	collection, eventsListStr, outputDir, ok := readFlags()
-	if !ok {
-		os.Exit(0)
-	}
-	eventTypes := strings.Split(*eventsListStr, ",")
-	launch(*collection, eventTypes, *outputDir)
+	helpers.Logging(loggingPrefix, "END...")
 }

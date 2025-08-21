@@ -17,6 +17,20 @@
             </Attribute>
           </value>
         </entry>
+        <entry key="\files\operations_decentraland_rarible.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value="," />
+            </Attribute>
+          </value>
+        </entry>
+        <entry key="\files\operations_test_decentraland_rarible.csv">
+          <value>
+            <Attribute>
+              <option name="separator" value=";" />
+            </Attribute>
+          </value>
+        </entry>
       </map>
     </option>
   </component>

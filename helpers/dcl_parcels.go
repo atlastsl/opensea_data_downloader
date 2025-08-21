@@ -2,9 +2,7 @@ package helpers
 
 import (
 	"OpenSeaDataDownloader/utils"
-	"fmt"
 	"path/filepath"
-	"time"
 )
 
 type DecentralandParcel struct {
@@ -20,7 +18,7 @@ type DecentralandParcelList struct {
 }
 
 func ReadDecentralandParcels() map[string]*DecentralandParcel {
-	filePath := filepath.Join("events", "data", "decentraland_parcels.json")
+	filePath := filepath.Join("data", "decentraland_parcels.json")
 	resp := &DecentralandParcelList{}
 	err := utils.ReadJsonFile(filePath, resp)
 	if err != nil {
@@ -31,8 +29,4 @@ func ReadDecentralandParcels() map[string]*DecentralandParcel {
 		parcelsList[parcel.TokenId] = parcel
 	}
 	return parcelsList
-}
-
-func Logging(loggingPrefix, line string) {
-	println(fmt.Sprintf("[%s] // (Opensea DL) %s // %s", time.Now().Format(time.RFC3339), loggingPrefix, line))
 }

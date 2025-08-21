@@ -1,22 +1,16 @@
-package main
+package downloader
 
 import (
 	"OpenSeaDataDownloader/helpers"
 	"OpenSeaDataDownloader/utils"
-	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"github.com/joho/godotenv"
-	"github.com/kamva/mgm/v3"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type RaribleTakerMakerInfo struct {
@@ -72,84 +66,10 @@ type RaribleTActivityList struct {
 	Activities []*RaribleTActivity `mapstructure:"activities" json:"activities"`
 }
 
-type RaribleOperation struct {
-	mgm.DefaultModel  `bson:",inline"`
-	OperationId       string     `bson:"operation_id" json:"operation_id"`
-	Type              string     `bson:"type" json:"type"`
-	Source            string     `bson:"source" json:"source"`
-	Date              *time.Time `bson:"date" json:"date"`
-	LastUpdatedAt     *time.Time `bson:"last_updated_at,omitempty" json:"last_updated_at"`
-	Cursor            string     `bson:"cursor,omitempty" json:"cursor"`
-	Reverted          bool       `bson:"reverted,omitempty" json:"reverted"`
-	OrderId           string     `bson:"order_id,omitempty" json:"order_id"`
-	OrderHash         string     `bson:"order_hash,omitempty" json:"order_hash"`
-	TransactionHash   string     `bson:"transaction_hash,omitempty" json:"transaction_hash"`
-	TransactionType   string     `bson:"transaction_type,omitempty" json:"transaction_type"`
-	Maker             string     `bson:"maker,omitempty" json:"maker"`
-	Taker             string     `bson:"taker,omitempty" json:"taker"`
-	Buyer             string     `bson:"buyer,omitempty" json:"buyer"`
-	Seller            string     `bson:"seller,omitempty" json:"seller"`
-	Metaverse         string     `bson:"metaverse,omitempty" json:"metaverse"`
-	Blockchain        string     `bson:"blockchain,omitempty" json:"blockchain"`
-	AssetContract     string     `bson:"asset_contract,omitempty" json:"asset_contract"`
-	AssetType         string     `bson:"asset_type,omitempty" json:"asset_type"`
-	AssetId           string     `bson:"asset_id,omitempty" json:"asset_id"`
-	AssetLocation     string     `bson:"asset_location,omitempty" json:"asset_location"`
-	AssetLocX         *int       `bson:"asset_loc_x" json:"asset_loc_x"`
-	AssetLocY         *int       `bson:"asset_loc_y" json:"asset_loc_y"`
-	AssetValue        int        `bson:"asset_value,omitempty" json:"asset_value"`
-	PaymentBlockchain string     `bson:"payment_blockchain,omitempty" json:"payment_blockchain"`
-	PaymentType       string     `bson:"payment_type,omitempty" json:"payment_type"`
-	PaymentToken      string     `bson:"payment_token,omitempty" json:"payment_token"`
-	PaymentCurrency   string     `bson:"payment_currency,omitempty" json:"payment_currency"`
-	PaymentAmount     float64    `bson:"payment_amount,omitempty" json:"payment_amount"`
-	PaymentAmountUsd  float64    `bson:"payment_amount_usd,omitempty" json:"payment_amount_usd"`
-	PaymentCcyPrice   float64    `bson:"payment_ccy_price,omitempty" json:"payment_ccy_price"`
-	BuyerOrderHash    string     `bson:"buyer_order_hash,omitempty" json:"buyer_order_hash"`
-	SellerOrderHash   string     `bson:"seller_order_hash,omitempty" json:"seller_order_hash"`
-	BlockHash         string     `bson:"block_hash,omitempty" json:"block_hash"`
-	BlockNumber       int64      `bson:"block_number,omitempty" json:"block_number"`
-	LogIndex          int64      `bson:"log_index,omitempty" json:"log_index"`
-}
-
-type Currency struct {
-	mgm.DefaultModel `bson:",inline"`
-	Blockchain       string `bson:"blockchain"`
-	Contract         string `bson:"contract"`
-	Symbols          string `bson:"symbols"`
-}
-
-func (o RaribleOperation) CollectionName() string {
-	return "rarible_operations"
-}
-
-func getCurrencies(blockchain string, dbInstance *mongo.Database) (map[string]string, error) {
-	dbCollection := utils.CollectionInstance(dbInstance, &Currency{})
-	cursor, err := dbCollection.Find(context.Background(), bson.M{"blockchain": blockchain})
+func getRaribleNftActStartCursor(metaverse, blockchain, contractId string, eventTypes []string, dbInstance *mongo.Database) (string, error) {
+	lastOperation, err := FindLastRecordedOperation("rarible", metaverse, blockchain, contractId, eventTypes, dbInstance)
 	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(context.Background())
-	results := make([]*Currency, 0)
-	err = cursor.All(context.Background(), &results)
-	currencies := make(map[string]string)
-	for _, result := range results {
-		currencies[fmt.Sprintf("%s:%s", strings.ToLower(result.Blockchain), strings.ToLower(result.Contract))] = result.Symbols
-	}
-	return currencies, nil
-}
-
-func getRaribleNftActStartCursor(blockchain, contractId string, eventTypes []string, dbInstance *mongo.Database) (string, error) {
-	lastOperation := &RaribleOperation{}
-	dbCollection := utils.CollectionInstance(dbInstance, lastOperation)
-	payload := bson.M{"blockchain": blockchain, "asset_contract": contractId, "type": bson.M{"$in": eventTypes}}
-	err := dbCollection.FirstWithCtx(context.Background(), payload, lastOperation, &options.FindOneOptions{Sort: bson.M{"date": -1}})
-	if err != nil {
-		if !errors.Is(err, mongo.ErrNoDocuments) {
-			return "", err
-		} else {
-			lastOperation = nil
-		}
+		return "", err
 	}
 	if lastOperation != nil {
 		return lastOperation.Cursor, nil
@@ -182,7 +102,7 @@ func getRaribleNftActivities(blockchain, contractId, cursor string, eventTypes [
 	return activitiesList, err
 }
 
-func parseRaribleNftActivity(rrbActivity *RaribleTActivity, metaverse, blockchain string, parcelList map[string]*helpers.DecentralandParcel, currencies map[string]string) *RaribleOperation {
+func parseRaribleNftActivity(rrbActivity *RaribleTActivity, metaverse, blockchain string, parcelList map[string]*helpers.DecentralandParcel, currencies map[string]string) *SecondMarketOperation {
 	opDate, _ := time.Parse(time.RFC3339, rrbActivity.Date)
 	opLastUpdatedAt, _ := time.Parse(time.RFC3339Nano, rrbActivity.LastUpdatedAt)
 	maker, taker, buyer, seller := "", "", "", ""
@@ -214,7 +134,7 @@ func parseRaribleNftActivity(rrbActivity *RaribleTActivity, metaverse, blockchai
 	var assetLocX, assetLocY *int
 	if assetInfo != nil {
 		assetContract = strings.Split(assetInfo.Contract, ":")[1]
-		assetType = assetInfo.Type
+		assetType = GetAssetType(metaverse, assetContract)
 		assetId = assetInfo.TokenId
 		parcel, ok := parcelList[assetId]
 		if ok {
@@ -273,8 +193,9 @@ func parseRaribleNftActivity(rrbActivity *RaribleTActivity, metaverse, blockchai
 		blockNumber = rrbActivity.BlockchainInfo.BlockNumber
 		logIndex = rrbActivity.BlockchainInfo.LogIndex
 	}
-	operation := &RaribleOperation{
+	operation := &SecondMarketOperation{
 		OperationId:       rrbActivity.Id,
+		DownloadedFrom:    "rarible",
 		Type:              rrbActivity.Type,
 		Source:            rrbActivity.Source,
 		Date:              &opDate,
@@ -310,47 +231,33 @@ func parseRaribleNftActivity(rrbActivity *RaribleTActivity, metaverse, blockchai
 		BlockHash:         blockHash,
 		BlockNumber:       blockNumber,
 		LogIndex:          logIndex,
+		Data:              rrbActivity,
 	}
 	return operation
 }
 
-func saveRaribleOperations(operations []*RaribleOperation, dbInstance *mongo.Database) error {
-	if operations != nil && len(operations) > 0 {
-		dbCollection := utils.CollectionInstance(dbInstance, &RaribleOperation{})
-
-		dbRequests := make([]mongo.WriteModel, len(operations))
-		for i, operation := range operations {
-			var filterPayload = bson.M{"operation_id": operation.OperationId, "type": operation.Type, "source": operation.Source, "date": operation.Date}
-			dbRequests[i] = mongo.NewReplaceOneModel().SetFilter(filterPayload).SetReplacement(operation).SetUpsert(true)
-		}
-		_, err := dbCollection.BulkWrite(context.Background(), dbRequests)
-		return err
-	}
-	return nil
-}
-
-func raribleLaunch(blockchain, metaverse, assetContract string, eventTypes []string) {
+func RaribleLaunch(blockchain, metaverse, assetContract string, eventTypes []string) {
 	loggingPrefix := fmt.Sprintf("{ %s | %s | %s }", blockchain, metaverse, strings.Join(eventTypes, ","))
 	helpers.Logging(loggingPrefix, "Start...")
 
 	helpers.Logging(loggingPrefix, "Connection to database...")
-	dbInstance, err := utils.NewDatabaseConnection()
+	dbInstance, err := helpers.NewDatabaseConnection()
 	if err != nil {
 		panic(err)
 	}
-	defer utils.CloseDatabaseConnection(dbInstance)
+	defer helpers.CloseDatabaseConnection(dbInstance)
 	helpers.Logging(loggingPrefix, "Connected to database !!!")
 
 	helpers.Logging(loggingPrefix, "Read currencies & parcels data...")
 	parcelsList := helpers.ReadDecentralandParcels()
-	currencies, err := getCurrencies(blockchain, dbInstance)
+	currencies, err := helpers.GetCurrencies(blockchain, dbInstance)
 	if err != nil {
 		panic(err)
 	}
 	helpers.Logging(loggingPrefix, "Read currencies & parcels data OK !!!")
 
 	helpers.Logging(loggingPrefix, "Getting first request `cursor` ...")
-	startCursor, err := getRaribleNftActStartCursor(blockchain, assetContract, eventTypes, dbInstance)
+	startCursor, err := getRaribleNftActStartCursor(metaverse, blockchain, assetContract, eventTypes, dbInstance)
 	if err != nil {
 		panic(err)
 	}
@@ -373,11 +280,11 @@ func raribleLaunch(blockchain, metaverse, assetContract string, eventTypes []str
 			stop = true
 			loopErr = errors.New("error when parsing events list")
 		} else {
-			operations := make([]*RaribleOperation, len(activityList.Activities))
+			operations := make([]*SecondMarketOperation, len(activityList.Activities))
 			for i, activity := range activityList.Activities {
 				operations[i] = parseRaribleNftActivity(activity, metaverse, blockchain, parcelsList, currencies)
 			}
-			err = saveRaribleOperations(operations, dbInstance)
+			err = Save2ndMarketOperations(operations, dbInstance)
 			if err != nil {
 				loopErr = err
 				helpers.Logging(loggingPrefix, fmt.Sprintf("Error occurred when saving data for request #%d ...", requestCount))
@@ -389,6 +296,7 @@ func raribleLaunch(blockchain, metaverse, assetContract string, eventTypes []str
 					if len(activityList.Activities) == 0 {
 						stop = true
 					} else {
+						stop = true
 						time.Sleep(1 * time.Second)
 					}
 				} else {
@@ -405,57 +313,4 @@ func raribleLaunch(blockchain, metaverse, assetContract string, eventTypes []str
 	}
 
 	helpers.Logging(loggingPrefix, "END...")
-}
-
-func raribleUsage() {
-	log.Println("Usage: rarible [-b blockchain] [-x metaverse] [-c asset_contract] [-e events (comma-separated)]")
-	flag.PrintDefaults()
-}
-
-func raribleShowUsageAndExit(exitCode int) {
-	raribleUsage()
-	os.Exit(exitCode)
-}
-
-func raribleReadFlags() (*string, *string, *string, *string, bool) {
-	var blockchain = flag.String("b", "", "Blockchain (ethereum | polygon)")
-	var collection = flag.String("x", "", "Metaverse (decentraland | thesandbox)")
-	var assetContract = flag.String("c", "", "Asset Contract")
-	var eventsListStr = flag.String("e", "", "events (comma-separated)")
-	log.SetFlags(0)
-	flag.Usage = raribleUsage
-	flag.Parse()
-
-	if *blockchain == "" {
-		raribleShowUsageAndExit(0)
-		return nil, nil, nil, nil, false
-	}
-	if *collection == "" {
-		raribleShowUsageAndExit(0)
-		return nil, nil, nil, nil, false
-	}
-	if *assetContract == "" {
-		raribleShowUsageAndExit(0)
-		return nil, nil, nil, nil, false
-	}
-	if *eventsListStr == "" {
-		raribleShowUsageAndExit(0)
-		return nil, nil, nil, nil, false
-	}
-	err := godotenv.Load(".env")
-	if err != nil {
-		log.Fatalf("Fail to load %s env file", ".env")
-		return nil, nil, nil, nil, false
-	}
-
-	return blockchain, collection, assetContract, eventsListStr, true
-}
-
-func main() {
-	blockchain, metaverse, assetContract, eventsListStr, ok := raribleReadFlags()
-	if !ok {
-		os.Exit(0)
-	}
-	eventTypes := strings.Split(*eventsListStr, ",")
-	raribleLaunch(*blockchain, *metaverse, *assetContract, eventTypes)
 }
