@@ -31,7 +31,7 @@ func ConvertStructToMap(o any, exclude []string, target *map[string]any) error {
 	}
 	sType := reflect.TypeOf(o)
 	sValue := reflect.ValueOf(o)
-	if sType.Kind() != reflect.Ptr {
+	if sType.Kind() == reflect.Ptr {
 		sType = sType.Elem()
 		sValue = sValue.Elem()
 	}
@@ -46,7 +46,11 @@ func ConvertStructToMap(o any, exclude []string, target *map[string]any) error {
 		}
 		mField := strings.Split(tag, ",")[0]
 		if mField != "" && !slices.Contains(exclude, mField) {
-			(*target)[mField] = sValue.Field(i).Interface()
+			if field.Type.Kind() == reflect.Ptr {
+				(*target)[mField] = sValue.Field(i).Elem().Interface()
+			} else {
+				(*target)[mField] = sValue.Field(i).Interface()
+			}
 		}
 	}
 	return nil

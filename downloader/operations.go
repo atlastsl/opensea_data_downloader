@@ -59,9 +59,9 @@ type SecondMarketOperation struct {
 }
 
 type SecondMarketOperationPerAsset struct {
-	Asset      string                   `mapstructure:"asset"`
-	Count      int64                    `mapstructure:"count"`
-	Operations []*SecondMarketOperation `mapstructure:"operations"`
+	Asset      string                   `bson:"_id" json:"_id"`
+	Count      int64                    `bson:"count" json:"count"`
+	Operations []*SecondMarketOperation `bson:"operations" json:"operations"`
 }
 
 type SecondMarketOperationExport struct {
@@ -139,11 +139,20 @@ func GetOperations(metaverse, source string, dbInstance *mongo.Database) ([]*Sec
 }
 
 func sortOperationFunc(a, b map[string]any) int {
-	aDate, _ := a["date"].(*time.Time)
-	bDate, _ := b["date"].(*time.Time)
+	aDate, _ := a["date"].(time.Time)
+	bDate, _ := b["date"].(time.Time)
 	if aDate.UnixMilli() < bDate.UnixMilli() {
 		return -1
 	} else if aDate.UnixMilli() > bDate.UnixMilli() {
+		return 1
+	}
+	return 0
+}
+
+func sort2MOperationFunc(a, b *SecondMarketOperation) int {
+	if a.Date.UnixMilli() < b.Date.UnixMilli() {
+		return -1
+	} else if a.Date.UnixMilli() > b.Date.UnixMilli() {
 		return 1
 	}
 	return 0
@@ -179,7 +188,7 @@ func initializeExportOpAddInfo() (m map[string]interface{}) {
 	m = map[string]interface{}{
 		"related_to":      "",
 		"rt_date":         "",
-		"rt_time_diff":    0.0,
+		"rt_time_diff":    nil,
 		"rt_operation_id": "",
 	}
 	return m
@@ -193,13 +202,13 @@ func initializeExportOpAddInfoHT() (h []string, t []string) {
 
 func populateExportOpAddInfo(m *map[string]interface{}, relatedTo string, rtDate *time.Time, rtTimeDiff float64, rtOperationId string) {
 	(*m)["related_to"] = relatedTo
-	(*m)["rt_date"] = rtDate.Format(time.RFC3339Nano)
+	(*m)["rt_date"] = rtDate
 	(*m)["rt_time_diff"] = rtTimeDiff
 	(*m)["rt_operation_id"] = rtOperationId
 }
 
 func GetOperationsForExport(metaverse, source, metric string, longFields []string, dbInstance *mongo.Database, loggingPrefix string) (*SecondMarketOperationExport, error) {
-
+	validTypes := []string{"LIST", "SELL"}
 	/*
 		Step 1 : Pipeline to get data from database
 	*/
@@ -209,8 +218,8 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 	filter1Stage := bson.D{
 		{"$match", bson.D{{"metaverse", metaverse}, {"downloaded_from", source}}},
 	}
-	_ = bson.D{
-		{"$match", bson.D{{"type", "SELL"}}},
+	filter2Stage := bson.D{
+		{"$match", bson.D{{"type", bson.D{{"$in", validTypes}}}}},
 	}
 	distinctAssetsStage := bson.D{
 		{"$group", bson.D{
@@ -220,8 +229,23 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 	}
 	joinOperationsStage := bson.D{
 		{"$lookup", bson.D{
-			{"from", "rarible_operations"}, {"localField", "_id"},
+			{"from", "second_market_operations"}, {"localField", "_id"},
 			{"foreignField", "asset_id"}, {"as", "operations"},
+		}},
+	}
+	_ = bson.D{
+		{"$unwind", bson.D{
+			{"path", "$operations"}, {"preserveNullAndEmptyArrays", true},
+		}},
+	}
+	_ = bson.D{
+		{"$match", bson.D{{"operations.type", bson.D{{"$nin", []string{"BID"}}}}}},
+	}
+	_ = bson.D{
+		{"$group", bson.D{
+			{"_id", "$asset_id"},
+			{"count", bson.D{{"$sum", 1}}},
+			{"operations", bson.D{{"$push", "$operations"}}},
 		}},
 	}
 	sortStage := bson.D{
@@ -230,16 +254,16 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 		}},
 	}
 	limitStage := bson.D{
-		{"$limit", 20},
+		{"$limit", 50000},
 	}
-	pipeline := mongo.Pipeline{filter1Stage, distinctAssetsStage, joinOperationsStage, sortStage, limitStage}
+	pipeline := mongo.Pipeline{filter1Stage, filter2Stage, distinctAssetsStage, joinOperationsStage, sortStage, limitStage}
 	opts := options.Aggregate().SetAllowDiskUse(true)
 	cursor, err := dbCollection.Aggregate(context.Background(), pipeline, opts)
 	if err != nil {
 		return nil, err
 	}
-	rawOperationsPerSoldAssets := make([]bson.M, 0)
-	err = cursor.All(context.Background(), &rawOperationsPerSoldAssets)
+	operationsPerSoldAssets := make([]*SecondMarketOperationPerAsset, 0)
+	err = cursor.All(context.Background(), &operationsPerSoldAssets)
 	if err != nil {
 		return nil, err
 	}
@@ -253,27 +277,34 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 	/*
 		Step 2 : Loop to parse data and convert to map[string]any
 	*/
+	excludeOpMapHeaders := []string{"cursor", "reverted", "data"}
 	helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Loop over assets..."))
-	aCount := len(rawOperationsPerSoldAssets)
+	aCount := len(operationsPerSoldAssets)
 	aIndex := 0
 	operations := make([]map[string]any, 0)
-	for _, rawRopsaItem := range rawOperationsPerSoldAssets {
+	for _, ropsaItem := range operationsPerSoldAssets {
 		aIndex++
-		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing asset %s [%d/%d] ...", rawRopsaItem["_id"], aIndex, aCount))
+		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing asset %s [%d/%d] ...", utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
 
 		/*
-			Step 2.1 : Convert pipeline result to Operation Struct
+			Step 2.1 : Sort asset operations
 		*/
-		ropsaItem := &SecondMarketOperationPerAsset{}
-		_ = utils.ConvertMapToStruct(rawRopsaItem, ropsaItem)
+		slices.SortFunc(ropsaItem.Operations, sort2MOperationFunc)
 
 		windowStart := 0
-		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing asset %s [%d/%d]! Loop over asset operations...", rawRopsaItem["_id"], aIndex, aCount))
+		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing asset %s [%d/%d]! Loop over asset operations...", utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
 		oCount := len(ropsaItem.Operations)
 		oIndex := 0
 		for i, assetOp := range ropsaItem.Operations {
 			oIndex++
-			helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing operation %s [%d/%d] of asset %s [%d/%d]...", assetOp.OperationId, oIndex, oCount, rawRopsaItem["_id"], aIndex, aCount))
+			helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processing operation %s [%d/%d] of asset %s [%d/%d]...", utils.ShortenString(assetOp.OperationId), oIndex, oCount, utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
+
+			if !slices.Contains(validTypes, assetOp.Type) {
+				helpers.Logging(dbLoggingPrefix, "Operation type is not in allowed types.")
+				helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed operation %s [%d/%d] of asset %s [%d/%d]. !!!", utils.ShortenString(assetOp.OperationId), oIndex, oCount, utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
+				continue
+			}
+
 			/*
 				Step 2.2 : Correct Currency Price & Amount USD if necessary and possible
 			*/
@@ -293,22 +324,23 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 			astOpAddInfo := initializeExportOpAddInfo()
 			if assetOp.Type == "SELL" {
 				if i > 0 {
-					rtOperation := new(SecondMarketOperation)
+					var rtOperation *SecondMarketOperation
 					listingIndex := filterGetPreviousListingOrBid("LIST", assetOp, ropsaItem.Operations[windowStart:i])
 					if listingIndex >= 0 {
 						listingOp := ropsaItem.Operations[windowStart+listingIndex]
 						populateExportOpAddInfo(&astOpAddInfo, "LIST", listingOp.Date, assetOp.Date.Sub(*listingOp.Date).Hours()/24, listingOp.OperationId)
 						windowStart += listingIndex + 1
 						rtOperation = listingOp
-					} else {
-						bidIndex := filterGetPreviousListingOrBid("BID", assetOp, ropsaItem.Operations[windowStart:i])
-						if bidIndex >= 0 {
-							bidOp := ropsaItem.Operations[windowStart+bidIndex]
-							populateExportOpAddInfo(&astOpAddInfo, "BID", bidOp.Date, assetOp.Date.Sub(*bidOp.Date).Hours()/24, bidOp.OperationId)
-							windowStart += listingIndex + 1
-							rtOperation = bidOp
-						}
 					}
+					//else {
+					//	bidIndex := filterGetPreviousListingOrBid("BID", assetOp, ropsaItem.Operations[windowStart:i])
+					//	if bidIndex >= 0 {
+					//		bidOp := ropsaItem.Operations[windowStart+bidIndex]
+					//		populateExportOpAddInfo(&astOpAddInfo, "BID", bidOp.Date, assetOp.Date.Sub(*bidOp.Date).Hours()/24, bidOp.OperationId)
+					//		windowStart += listingIndex + 1
+					//		rtOperation = bidOp
+					//	}
+					//}
 					if rtOperation != nil {
 						rtIndex := slices.IndexFunc(operations, func(m map[string]any) bool {
 							return findExportedOpIndex(m, rtOperation.OperationId)
@@ -325,7 +357,7 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 				Step 2.4. Convert to Map
 			*/
 			assetOpMap := map[string]any{}
-			_ = utils.ConvertStructToMap(assetOp, []string{}, &assetOpMap)
+			_ = utils.ConvertStructToMap(assetOp, excludeOpMapHeaders, &assetOpMap)
 			for k, v := range astOpAddInfo {
 				assetOpMap[k] = v
 			}
@@ -361,10 +393,10 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 				Step 2.8. Operation treatment ended. All to list
 			*/
 			operations = append(operations, assetOpMap)
-			helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed operation %s [%d/%d] of asset %s [%d/%d] !!!", assetOp.OperationId, oIndex, oCount, rawRopsaItem["_id"], aIndex, aCount))
+			helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed operation %s [%d/%d] of asset %s [%d/%d] !!!", utils.ShortenString(assetOp.OperationId), oIndex, oCount, utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
 		}
 
-		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed asset %s [%d/%d] !!!", rawRopsaItem["_id"], aIndex, aCount))
+		helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed asset %s [%d/%d] !!!", utils.ShortenString(ropsaItem.Asset), aIndex, aCount))
 	}
 
 	helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Processed all assets !!!"))
@@ -375,10 +407,9 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 	helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Build columns headers & types..."))
 	headers := make([]string, 0)
 	types := make([]string, 0)
-	exclude := []string{"cursor", "reverted", "data"}
 	if len(operations) > 0 {
 		// Struct based headers & types
-		h1, t1 := utils.GetStructToMapHT(operations[0], exclude)
+		h1, t1 := utils.GetStructToMapHT(operationsPerSoldAssets[0].Operations[0], excludeOpMapHeaders)
 
 		// Related transaction headers & types
 		h2, t2 := initializeExportOpAddInfoHT()
@@ -407,6 +438,11 @@ func GetOperationsForExport(metaverse, source, metric string, longFields []strin
 		Step 3. Sort operations by date asc
 	*/
 	helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Sort operations..."))
+	ffOps := utils.ArrayFilter(operations, func(m map[string]any) bool {
+		dd, _ := m["date"].(*time.Time)
+		return dd == nil
+	})
+	println(len(ffOps))
 	slices.SortFunc(operations, sortOperationFunc)
 	helpers.Logging(dbLoggingPrefix, fmt.Sprintf("Operations sorted !!!"))
 

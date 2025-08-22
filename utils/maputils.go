@@ -10,8 +10,8 @@ func MapKeys(m map[string]any) []string {
 
 func shortenLongField(operationMap map[string]any, field string) {
 	longValue, ok := operationMap[field].(string)
-	if ok && len(longValue) > 20 {
-		operationMap[field] = longValue[0:6] + "..." + longValue[(len(longValue)-4):]
+	if ok {
+		operationMap[field] = ShortenString(longValue)
 	}
 }
 

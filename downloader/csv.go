@@ -43,7 +43,7 @@ func ExportOperations(metaverse, source, metric string) {
 	helpers.Logging(loggingPrefix, "Operations retrieved from database")
 
 	helpers.Logging(loggingPrefix, "Writing operations in file...")
-	filename := fmt.Sprintf("./files/operations_test_%s_%s.csv", metaverse, source)
+	filename := fmt.Sprintf("./files/operations_test_plus_%s_%s.csv", metaverse, source)
 	err = utils.WriteInCsv2(filename, result.Operations, result.ColNames, result.ColTypes)
 	if err != nil {
 		panic(err)
