@@ -353,7 +353,7 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 	loggingPrefix := fmt.Sprintf("{ %s | %s | %s }", blockchain, metaverse, strings.Join(eventTypes, ","))
 	helpers.Logging(loggingPrefix, "Start...")
 
-	maxTimestamp, minTimestamp := 1672531200, 1609459200
+	//maxTimestamp, minTimestamp := 1672531200, 1609459200
 
 	helpers.Logging(loggingPrefix, "Read parcels data...")
 	parcelsList := helpers.ReadDecentralandParcels()
@@ -369,9 +369,9 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 
 	helpers.Logging(loggingPrefix, "Getting first request `before` timestamp...")
 	startTimestamp, err := getOpenseaTimestampStart(metaverse, eventTypes, dbInstance)
-	if startTimestamp == 0 {
-		startTimestamp = int64(maxTimestamp)
-	}
+	//if startTimestamp == 0 {
+	//	startTimestamp = int64(maxTimestamp)
+	//}
 	if err != nil {
 		panic(err)
 	}
@@ -406,12 +406,14 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 			} else {
 				helpers.Logging(loggingPrefix, fmt.Sprintf("Save data for request #%d ...", requestCount))
 				if eventsList.Next != "" {
-					if len(eventsList.AssetEvents) > 0 && eventsList.AssetEvents[len(eventsList.AssetEvents)-1].EventTimestamp < int64(minTimestamp) {
-						stop = true
-					} else {
-						nextToken = eventsList.Next
-						//stop = true
-					}
+					//if len(eventsList.AssetEvents) > 0 && eventsList.AssetEvents[len(eventsList.AssetEvents)-1].EventTimestamp < int64(minTimestamp) {
+					//	stop = true
+					//} else {
+					//	nextToken = eventsList.Next
+					//	//stop = true
+					//}
+					nextToken = eventsList.Next
+					//stop = true
 				} else {
 					stop = true
 				}
