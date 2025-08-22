@@ -47,7 +47,11 @@ func ConvertStructToMap(o any, exclude []string, target *map[string]any) error {
 		mField := strings.Split(tag, ",")[0]
 		if mField != "" && !slices.Contains(exclude, mField) {
 			if field.Type.Kind() == reflect.Ptr {
-				(*target)[mField] = sValue.Field(i).Elem().Interface()
+				if sValue.Field(i).Elem().IsZero() {
+					(*target)[mField] = reflect.Zero(field.Type.Elem()).Interface()
+				} else {
+					(*target)[mField] = sValue.Field(i).Elem().IsZero()
+				}
 			} else {
 				(*target)[mField] = sValue.Field(i).Interface()
 			}
