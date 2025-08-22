@@ -104,7 +104,7 @@ func main() {
 	}
 	if appInput.Purpose == "download" {
 		if appInput.Source == "opensea" {
-			downloader.OpenseaLaunch(appInput.Blockchain, appInput.Metaverse, appInput.EventTypes)
+			downloader.OpenseaConvert(appInput.Blockchain, appInput.Metaverse, appInput.EventTypes)
 		} else if appInput.Source == "rarible" {
 			downloader.RaribleLaunch(appInput.Blockchain, appInput.Metaverse, appInput.AssetContract, appInput.EventTypes)
 		}

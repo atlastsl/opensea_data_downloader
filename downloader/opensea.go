@@ -3,6 +3,7 @@ package downloader
 import (
 	"OpenSeaDataDownloader/helpers"
 	"OpenSeaDataDownloader/utils"
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -13,7 +14,9 @@ import (
 	"time"
 
 	"github.com/kamva/mgm/v3"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type EventPayment struct {
@@ -166,9 +169,9 @@ func formatType(rawType string) string {
 		return "SELL"
 	} else if rawType == "listing" {
 		return "LIST"
-	} else if rawType == "item_offer" {
+	} else if rawType == "item_offer" || rawType == "offer" {
 		return "BID"
-	} else if rawType == "TRANSFER" {
+	} else if rawType == "transfer" {
 		return "TRANSFER"
 	}
 	return ""
@@ -428,4 +431,98 @@ func OpenseaLaunch(blockchain, metaverse string, eventTypes []string) {
 	}
 
 	helpers.Logging(loggingPrefix, "END...")
+}
+
+func OpenseaConvert(blockchain, metaverse string, eventTypes []string) {
+	opsOperations := make([]*Operation, 0)
+	dbInstance, err := helpers.NewDatabaseConnection()
+	if err != nil {
+		panic(err)
+	}
+	dbCollection := helpers.CollectionInstance(dbInstance, &Operation{})
+
+	cursor, err := dbCollection.Find(context.Background(), bson.M{}, options.Find().SetSort(bson.M{"date": 1}).SetAllowDiskUse(true))
+	if err != nil {
+		panic(err)
+	}
+	defer cursor.Close(context.Background())
+	err = cursor.All(context.Background(), &opsOperations)
+	if err != nil {
+		panic(err)
+	}
+
+	cOperations := make([]*SecondMarketOperation, len(opsOperations))
+	for i, op := range opsOperations {
+		operationType := formatType(op.Type)
+		opOrderHash := op.OrderHash
+		opEventTime := op.Date
+		hashPayload := fmt.Sprintf("%s:%s:%s:%s:%s:%s", metaverse, operationType, opEventTime.Format(time.RFC3339Nano), opOrderHash, op.FromAddress, op.AssetId)
+		operationId := utils.CreateHash(hashPayload)
+		paymentType := ""
+		if op.PaymentAmount != 0.0 {
+			if slices.Contains([]string{"ETH", "POL", "MATIC"}, op.PaymentCurrency) {
+				paymentType = op.PaymentCurrency
+			} else {
+				paymentType = "ERC20"
+			}
+		}
+		seller, buyer := "", ""
+		if op.Seller != "" {
+			seller = op.Seller
+		} else {
+			seller = op.FromAddress
+		}
+		if op.Buyer != "" {
+			buyer = op.Buyer
+		} else {
+			buyer = op.ToAddress
+		}
+		cOperations[i] = &SecondMarketOperation{
+			OperationId:       operationId,
+			DownloadedFrom:    "opensea",
+			Type:              formatType(op.Type),
+			Source:            "OPEN_SEA",
+			Date:              &op.Date,
+			LastUpdatedAt:     &op.Date,
+			Cursor:            strconv.FormatInt(op.Date.UnixMilli(), 10),
+			Reverted:          false,
+			OrderId:           "",
+			OrderHash:         op.OrderHash,
+			TransactionHash:   op.TransactionHash,
+			TransactionType:   "",
+			Maker:             op.Maker,
+			Taker:             op.Taker,
+			Buyer:             buyer,
+			Seller:            seller,
+			Metaverse:         metaverse,
+			Blockchain:        blockchain,
+			AssetContract:     op.AssetContract,
+			AssetType:         op.AssetType,
+			AssetId:           op.AssetId,
+			AssetLocation:     op.AssetLocation,
+			AssetLocX:         op.AssetLocX,
+			AssetLocY:         op.AssetLocY,
+			AssetValue:        op.Quantity,
+			PaymentBlockchain: op.Blockchain,
+			PaymentType:       paymentType,
+			PaymentToken:      op.PaymentToken,
+			PaymentCurrency:   op.PaymentCurrency,
+			PaymentAmount:     op.PaymentAmount,
+			PaymentAmountUsd:  0,
+			PaymentCcyPrice:   0,
+			BuyerOrderHash:    "",
+			SellerOrderHash:   "",
+			BlockHash:         "",
+			BlockNumber:       0,
+			LogIndex:          0,
+			Data: map[string]any{
+				"opensea": op,
+			},
+		}
+	}
+
+	err = Save2ndMarketOperations(cOperations, dbInstance)
+	if err != nil {
+		panic(err)
+	}
 }
